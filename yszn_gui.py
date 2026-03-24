@@ -31,13 +31,13 @@ session.headers.update(COMMON_HEADERS)
 _created_dirs = set()
 _created_dirs_lock = threading.Lock()
 
-# ========= HTTP：带“当前目录”概念 =========
+# ========= HTTP =========
 
 def list_public_entries(cur_dir: str):
     """
     列出当前目录下的条目（文件 + 子目录）。
-    解析表格中的“资源名 + 大小”：size==4096 视为目录。
-    适配当前 HTML：href 多为相对路径，如 "qqqqq" 或 "%E6%8A%80...".
+    解析表格中的"资源名 + 大小"：size==4096 视为目录。
+    href 为相对路径，如 "qqqqq" 或 "%E6%8A%80...".
     """
     if cur_dir:
         url = f"{BASE_URL}/public_dir/{quote(cur_dir)}"
@@ -52,8 +52,6 @@ def list_public_entries(cur_dir: str):
 
     entries = []
 
-    # 每行类似：
-    # <tr><td><a href="qqqqq" ...>qqqqq</a></td><td>4096</td><td>时间</td></tr>
     row_pattern = re.compile(
         r'<tr>\s*<td>\s*<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>\s*</td>\s*'
         r'<td>\s*(\d+)\s*</td>',
@@ -65,68 +63,16 @@ def list_public_entries(cur_dir: str):
         display_name = m.group(2).strip()
         size = int(m.group(3))
 
-        # 跳过上级目录和 .thumb
         if href.startswith("..") or display_name == "..":
             continue
         if href.startswith(".thumb") or display_name.startswith(".thumb"):
             continue
 
-        # 目录名实际用 href 里的编码内容来反解
-        encoded = href
-        name = unquote(encoded).strip()
+        name = unquote(href).strip()
         if not name:
             continue
 
         is_dir = (size == 4096)
-        entries.append({"name": name, "is_dir": is_dir})
-
-    return entries
-
-
-    """
-    列出当前目录下的条目（文件 + 子目录）。
-    cur_dir: 相对 /public_dir 的路径，比如 "" 或 "Anime"。
-    返回: [{'name': 显示名, 'is_dir': True/False}, ...]
-    """
-    if cur_dir:
-        url = f"{BASE_URL}/public_dir/{quote(cur_dir)}"
-    else:
-        url = f"{BASE_URL}/public_dir"
-    resp = session.get(url, timeout=10)
-    resp.raise_for_status()
-    html = resp.text
-
-    # 调试用
-    with open("public_dir_debug.html", "w", encoding="utf-8", errors="ignore") as f:
-        f.write(html)
-
-    entries = []
-    # 原页面是一个 index-of 样式的列表：href="xxxx"；目录一般是 name 末尾带 /，或者 type= directory
-    # 我们这里按 href 抓，然后根据是否以 / 结尾来判断目录
-    pattern = re.compile(r'href="([^"]+)"', re.IGNORECASE)
-
-    for m in pattern.finditer(html):
-        href = m.group(1)
-        # 只关注指向 /public_dir/... 的链接
-        if not href.startswith("/public_dir"):
-            continue
-        rel = href[len("/public_dir/") :]
-
-        if rel == "" or rel == "..":
-            continue
-        if rel.startswith(".thumb"):
-            continue
-
-        name = unquote(rel)
-
-        # 目录在 index-of 页面中一般是 "子目录/"，文件是 "文件名"
-        is_dir = name.endswith("/")
-        if is_dir:
-            name = name.rstrip("/")
-
-        if not name:
-            continue
-
         entries.append({"name": name, "is_dir": is_dir})
 
     return entries
@@ -226,7 +172,7 @@ class YSZNViewer(tk.Tk):
         self.title("YSZN Public Viewer")
         self.geometry("720x430")
 
-        # 当前所在的远端目录，相对 /public_dir
+        # 当前所在的远端目录，相对 /public_dir，例如 "" 或 "qqqqq" 或 "qqqqq/sub"
         self.current_dir = ""
 
         self.create_widgets()
@@ -294,7 +240,6 @@ class YSZNViewer(tk.Tk):
 
         def update_ui():
             self.tree.delete(*self.tree.get_children())
-            # 顶部显示当前目录
             self.tree.heading("name", text=f"{show_dir} 条目")
 
             if self.current_dir:
@@ -303,15 +248,14 @@ class YSZNViewer(tk.Tk):
             for e in entries:
                 typ = "目录" if e["is_dir"] else "文件"
                 tag = "dir" if e["is_dir"] else "file"
-                # 注意这里只插入相对名，不加 /public_dir
+                # 只存相对名（不带 /public_dir 前缀）
                 self.tree.insert("", tk.END, values=(e["name"], typ), tags=(tag,))
             self.set_status(f"{show_dir} 共 {len(entries)} 个条目")
             self.refresh_btn.config(state=tk.NORMAL)
 
         self.after(0, update_ui)
 
-
-    # ===== 双击行为：目录 = 进入；文件 = 下载 =====
+    # ===== 双击行为：目录=进入，文件=下载 =====
 
     def on_double_click(self, event):
         item_id = self.tree.selection()
@@ -321,7 +265,6 @@ class YSZNViewer(tk.Tk):
         name, typ = self.tree.item(item_id, "values")
 
         if name == "..":
-            # 返回上级
             if "/" in self.current_dir:
                 self.current_dir = self.current_dir.rsplit("/", 1)[0]
             else:
@@ -330,18 +273,21 @@ class YSZNViewer(tk.Tk):
             return
 
         if typ == "目录":
-            # 进入子目录
+            # current_dir 只拼相对路径，不含 /public_dir
             self.current_dir = f"{self.current_dir}/{name}" if self.current_dir else name
             self.refresh_file_list_async()
         else:
-            # 文件：下载
             self.download_and_open(name)
 
     # ===== 下载 =====
 
     def download_and_open(self, name):
         subdir = self.current_dir.replace("/", "_")
-        dst_path = os.path.join(DOWNLOAD_DIR, subdir, name) if subdir else os.path.join(DOWNLOAD_DIR, name)
+        dst_path = (
+            os.path.join(DOWNLOAD_DIR, subdir, name)
+            if subdir
+            else os.path.join(DOWNLOAD_DIR, name)
+        )
 
         def status_cb(text):
             self.after(0, lambda: self.set_status(text))
@@ -388,7 +334,7 @@ class YSZNViewer(tk.Tk):
                 target=self.download_and_open, args=(name,), daemon=True
             ).start()
 
-    # ===== 上传（沿用之前的文件/文件夹逻辑，上传到当前目录下） =====
+    # ===== 上传 =====
 
     def upload_files_or_dirs(self):
         file_paths = filedialog.askopenfilenames(title="选择要上传的文件（可多选，可取消）")
@@ -396,9 +342,7 @@ class YSZNViewer(tk.Tk):
 
         dir_roots = []
         while True:
-            root = filedialog.askdirectory(
-                title="选择要上传的根文件夹（取消结束选择）"
-            )
+            root = filedialog.askdirectory(title="选择要上传的根文件夹（取消结束选择）")
             if not root:
                 break
             dir_roots.append(os.path.abspath(root))
@@ -418,7 +362,6 @@ class YSZNViewer(tk.Tk):
 
             try:
                 for p in file_paths:
-                    # 文件直接丢到当前目录
                     name = os.path.basename(p)
                     remote_rel = f"{base}/{name}" if base else name
                     upload_single_file(p, remote_rel, status_cb=status_cb)
@@ -429,7 +372,6 @@ class YSZNViewer(tk.Tk):
                         for name in filenames:
                             local_path = os.path.join(dirpath, name)
                             rel_path = os.path.relpath(local_path, root).replace("\\", "/")
-                            # 当前目录 / 根名 / 相对路径
                             if base:
                                 remote_rel = f"{base}/{root_name}/{rel_path}"
                             else:
