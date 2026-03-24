@@ -28,6 +28,7 @@ COMMON_HEADERS = {
 session = requests.Session()
 session.headers.update(COMMON_HEADERS)
 
+# _created_dirs 不再在上传入口重置，由 _ensure_remote_dir 自行维护
 _created_dirs = set()
 _created_dirs_lock = threading.Lock()
 
@@ -106,6 +107,10 @@ def download_public_file_stream(cur_dir, name, dst_path, status_cb=None):
 
 
 def _ensure_remote_dir(rel_dir: str):
+    """
+    确保远端目录存在。全局 _created_dirs 缓存已创建的路径，
+    并发安全：只少发几个多余的 MKCOL，不会造成错误。
+    """
     if not rel_dir:
         return
     parts = rel_dir.strip("/").split("/")
@@ -321,6 +326,10 @@ class YSZNViewer(tk.Tk):
                 target=self.download_and_open, args=(name,), daemon=True
             ).start()
 
+    def _run_upload(self, worker_fn):
+        """在独立线程中执行上传任务。"""
+        threading.Thread(target=worker_fn, daemon=True).start()
+
     # ===== 上传文件（多选） =====
     def upload_files(self):
         file_paths = filedialog.askopenfilenames(title="选择要上传的文件（可多选）")
@@ -330,11 +339,9 @@ class YSZNViewer(tk.Tk):
         def status_cb(text):
             self.after(0, lambda: self.set_status(text))
 
+        base = self.current_dir
+
         def worker():
-            global _created_dirs
-            with _created_dirs_lock:
-                _created_dirs = set()
-            base = self.current_dir
             try:
                 for p in file_paths:
                     name = os.path.basename(p)
@@ -346,9 +353,9 @@ class YSZNViewer(tk.Tk):
                 self.set_status("上传失败")
                 messagebox.showerror("错误", f"上传失败：{e}")
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_upload(worker)
 
-    # ===== 上传文件夹（单次选择） =====
+    # ===== 上传文件夹 =====
     def upload_dirs(self):
         root = filedialog.askdirectory(title="选择要上传的文件夹")
         if not root:
@@ -358,21 +365,16 @@ class YSZNViewer(tk.Tk):
         def status_cb(text):
             self.after(0, lambda: self.set_status(text))
 
+        base = self.current_dir
+
         def worker():
-            global _created_dirs
-            with _created_dirs_lock:
-                _created_dirs = set()
-            base = self.current_dir
             try:
                 root_name = os.path.basename(root.rstrip("\\/"))
                 for dirpath, _, filenames in os.walk(root):
                     for name in filenames:
                         local_path = os.path.join(dirpath, name)
                         rel_path = os.path.relpath(local_path, root).replace("\\", "/")
-                        if base:
-                            remote_rel = f"{base}/{root_name}/{rel_path}"
-                        else:
-                            remote_rel = f"{root_name}/{rel_path}"
+                        remote_rel = f"{base}/{root_name}/{rel_path}" if base else f"{root_name}/{rel_path}"
                         upload_single_file(local_path, remote_rel_path=remote_rel, status_cb=status_cb)
                 status_cb("上传完成")
                 self.refresh_file_list_async()
@@ -380,7 +382,7 @@ class YSZNViewer(tk.Tk):
                 self.set_status("上传失败")
                 messagebox.showerror("错误", f"上传失败：{e}")
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_upload(worker)
 
     # ===== 删除 =====
     def delete_selected(self):
