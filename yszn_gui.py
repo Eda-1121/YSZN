@@ -1,4 +1,5 @@
 import os
+import time
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
@@ -28,7 +29,6 @@ COMMON_HEADERS = {
 session = requests.Session()
 session.headers.update(COMMON_HEADERS)
 
-# _created_dirs 不再在上传入口重置，由 _ensure_remote_dir 自行维护
 _created_dirs = set()
 _created_dirs_lock = threading.Lock()
 
@@ -107,10 +107,6 @@ def download_public_file_stream(cur_dir, name, dst_path, status_cb=None):
 
 
 def _ensure_remote_dir(rel_dir: str):
-    """
-    确保远端目录存在。全局 _created_dirs 缓存已创建的路径，
-    并发安全：只少发几个多余的 MKCOL，不会造成错误。
-    """
     if not rel_dir:
         return
     parts = rel_dir.strip("/").split("/")
@@ -129,6 +125,9 @@ def _ensure_remote_dir(rel_dir: str):
             print("MKCOL 失败:", url, r.status_code, r.text)
 
 
+UPLOAD_RETRIES = 3
+UPLOAD_RETRY_DELAY = 5  # 秒
+
 def upload_single_file(local_path: str, remote_rel_path: str = None, status_cb=None):
     if remote_rel_path is None:
         remote_rel_path = os.path.basename(local_path)
@@ -137,7 +136,9 @@ def upload_single_file(local_path: str, remote_rel_path: str = None, status_cb=N
         dir_part, file_name = remote_rel_path.rsplit("/", 1)
     else:
         dir_part, file_name = "", remote_rel_path
+
     _ensure_remote_dir(dir_part)
+
     encoded_name = quote(file_name.encode("utf-8"))
     if dir_part:
         url = f"{BASE_URL}/public_dir/{dir_part}/{encoded_name}"
@@ -145,11 +146,25 @@ def upload_single_file(local_path: str, remote_rel_path: str = None, status_cb=N
     else:
         url = f"{BASE_URL}/public_dir/{encoded_name}"
         show_name = file_name
-    if status_cb:
-        status_cb(f"正在上传：{show_name}")
-    with open(local_path, "rb") as f:
-        r = session.put(url, data=f, timeout=600)
-    r.raise_for_status()
+
+    last_err = None
+    for attempt in range(1, UPLOAD_RETRIES + 1):
+        try:
+            if status_cb:
+                suffix = f" (重试 {attempt}/{UPLOAD_RETRIES})" if attempt > 1 else ""
+                status_cb(f"正在上传：{show_name}{suffix}")
+            with open(local_path, "rb") as f:
+                r = session.put(url, data=f, timeout=600)
+            r.raise_for_status()
+            return  # 成功
+        except Exception as e:
+            last_err = e
+            if attempt < UPLOAD_RETRIES:
+                if status_cb:
+                    status_cb(f"上传失败，{UPLOAD_RETRY_DELAY}秒后重试：{show_name}")
+                time.sleep(UPLOAD_RETRY_DELAY)
+
+    raise last_err
 
 
 def delete_files_from_public_dir(cur_dir, names, status_cb=None):
@@ -299,7 +314,6 @@ class YSZNViewer(tk.Tk):
         def wait_and_open():
             threshold = 1 * 1024 * 1024
             tries = 0
-            import time
             while tries < 40:
                 if os.path.exists(dst_path) and os.path.getsize(dst_path) >= threshold:
                     break
@@ -327,10 +341,8 @@ class YSZNViewer(tk.Tk):
             ).start()
 
     def _run_upload(self, worker_fn):
-        """在独立线程中执行上传任务。"""
         threading.Thread(target=worker_fn, daemon=True).start()
 
-    # ===== 上传文件（多选） =====
     def upload_files(self):
         file_paths = filedialog.askopenfilenames(title="选择要上传的文件（可多选）")
         if not file_paths:
@@ -355,7 +367,6 @@ class YSZNViewer(tk.Tk):
 
         self._run_upload(worker)
 
-    # ===== 上传文件夹 =====
     def upload_dirs(self):
         root = filedialog.askdirectory(title="选择要上传的文件夹")
         if not root:
@@ -384,7 +395,6 @@ class YSZNViewer(tk.Tk):
 
         self._run_upload(worker)
 
-    # ===== 删除 =====
     def delete_selected(self):
         items = self.tree.selection()
         if not items:
