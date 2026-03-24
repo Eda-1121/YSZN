@@ -34,9 +34,6 @@ _created_dirs_lock = threading.Lock()
 # ========= HTTP =========
 
 def _is_dir_by_head(rel_path: str) -> bool:
-    """
-    对指定相对路径发 HEAD 请求，如果 Content-Type 包含 text/html 则视为目录。
-    """
     encoded = quote(rel_path.encode("utf-8"))
     url = f"{BASE_URL}/public_dir/{encoded}"
     try:
@@ -48,10 +45,6 @@ def _is_dir_by_head(rel_path: str) -> bool:
 
 
 def list_public_entries(cur_dir: str):
-    """
-    列出当前目录下的条目（文件 + 子目录）。
-    先从 HTML 解析名字列表，再对每个条目用 HEAD 判断目录/文件。
-    """
     if cur_dir:
         url = f"{BASE_URL}/public_dir/{quote(cur_dir)}"
     else:
@@ -63,7 +56,6 @@ def list_public_entries(cur_dir: str):
     with open("public_dir_debug.html", "w", encoding="utf-8", errors="ignore") as f:
         f.write(html)
 
-    # 解析所有条目名
     raw_names = []
     row_pattern = re.compile(
         r'<tr>\s*<td>\s*<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>\s*</td>\s*'
@@ -83,7 +75,6 @@ def list_public_entries(cur_dir: str):
             continue
         raw_names.append(name)
 
-    # 对每个条目用 HEAD 判断目录还是文件
     entries = []
     for name in raw_names:
         rel_path = f"{cur_dir}/{name}" if cur_dir else name
@@ -175,7 +166,7 @@ class YSZNViewer(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("YSZN Public Viewer")
-        self.geometry("720x430")
+        self.geometry("720x480")
         self.current_dir = ""
         self.create_widgets()
         self.refresh_file_list_async()
@@ -189,10 +180,15 @@ class YSZNViewer(tk.Tk):
         )
         self.refresh_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
-        self.upload_btn = tk.Button(
-            toolbar, text="上传（文件/文件夹）", command=self.upload_files_or_dirs
+        self.upload_file_btn = tk.Button(
+            toolbar, text="上传文件", command=self.upload_files
         )
-        self.upload_btn.pack(side=tk.LEFT, padx=5, pady=5)
+        self.upload_file_btn.pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.upload_dir_btn = tk.Button(
+            toolbar, text="上传文件夹", command=self.upload_dirs
+        )
+        self.upload_dir_btn.pack(side=tk.LEFT, padx=5, pady=5)
 
         self.download_btn = tk.Button(
             toolbar, text="下载选中", command=self.download_selected
@@ -325,18 +321,10 @@ class YSZNViewer(tk.Tk):
                 target=self.download_and_open, args=(name,), daemon=True
             ).start()
 
-    def upload_files_or_dirs(self):
-        file_paths = filedialog.askopenfilenames(title="选择要上传的文件（可多选，可取消）")
-        file_paths = list(file_paths)
-
-        dir_roots = []
-        while True:
-            root = filedialog.askdirectory(title="选择要上传的根文件夹（取消结束选择）")
-            if not root:
-                break
-            dir_roots.append(os.path.abspath(root))
-
-        if not file_paths and not dir_roots:
+    # ===== 上传文件（多选） =====
+    def upload_files(self):
+        file_paths = filedialog.askopenfilenames(title="选择要上传的文件（可多选）")
+        if not file_paths:
             return
 
         def status_cb(text):
@@ -352,6 +340,35 @@ class YSZNViewer(tk.Tk):
                     name = os.path.basename(p)
                     remote_rel = f"{base}/{name}" if base else name
                     upload_single_file(p, remote_rel, status_cb=status_cb)
+                status_cb("上传完成")
+                self.refresh_file_list_async()
+            except Exception as e:
+                self.set_status("上传失败")
+                messagebox.showerror("错误", f"上传失败：{e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ===== 上传文件夹（可多个根目录） =====
+    def upload_dirs(self):
+        dir_roots = []
+        while True:
+            root = filedialog.askdirectory(title="选择要上传的文件夹（取消结束选择）")
+            if not root:
+                break
+            dir_roots.append(os.path.abspath(root))
+
+        if not dir_roots:
+            return
+
+        def status_cb(text):
+            self.after(0, lambda: self.set_status(text))
+
+        def worker():
+            global _created_dirs
+            with _created_dirs_lock:
+                _created_dirs = set()
+            base = self.current_dir
+            try:
                 for root in dir_roots:
                     root_name = os.path.basename(root.rstrip("\\/"))
                     for dirpath, _, filenames in os.walk(root):
@@ -371,6 +388,7 @@ class YSZNViewer(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ===== 删除 =====
     def delete_selected(self):
         items = self.tree.selection()
         if not items:
