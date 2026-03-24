@@ -348,17 +348,12 @@ class YSZNViewer(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ===== 上传文件夹（可多个根目录） =====
+    # ===== 上传文件夹（单次选择） =====
     def upload_dirs(self):
-        dir_roots = []
-        while True:
-            root = filedialog.askdirectory(title="选择要上传的文件夹（取消结束选择）")
-            if not root:
-                break
-            dir_roots.append(os.path.abspath(root))
-
-        if not dir_roots:
+        root = filedialog.askdirectory(title="选择要上传的文件夹")
+        if not root:
             return
+        root = os.path.abspath(root)
 
         def status_cb(text):
             self.after(0, lambda: self.set_status(text))
@@ -369,17 +364,16 @@ class YSZNViewer(tk.Tk):
                 _created_dirs = set()
             base = self.current_dir
             try:
-                for root in dir_roots:
-                    root_name = os.path.basename(root.rstrip("\\/"))
-                    for dirpath, _, filenames in os.walk(root):
-                        for name in filenames:
-                            local_path = os.path.join(dirpath, name)
-                            rel_path = os.path.relpath(local_path, root).replace("\\", "/")
-                            if base:
-                                remote_rel = f"{base}/{root_name}/{rel_path}"
-                            else:
-                                remote_rel = f"{root_name}/{rel_path}"
-                            upload_single_file(local_path, remote_rel_path=remote_rel, status_cb=status_cb)
+                root_name = os.path.basename(root.rstrip("\\/"))
+                for dirpath, _, filenames in os.walk(root):
+                    for name in filenames:
+                        local_path = os.path.join(dirpath, name)
+                        rel_path = os.path.relpath(local_path, root).replace("\\", "/")
+                        if base:
+                            remote_rel = f"{base}/{root_name}/{rel_path}"
+                        else:
+                            remote_rel = f"{root_name}/{rel_path}"
+                        upload_single_file(local_path, remote_rel_path=remote_rel, status_cb=status_cb)
                 status_cb("上传完成")
                 self.refresh_file_list_async()
             except Exception as e:
