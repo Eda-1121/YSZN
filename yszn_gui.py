@@ -33,11 +33,24 @@ _created_dirs_lock = threading.Lock()
 
 # ========= HTTP =========
 
+def _is_dir_by_head(rel_path: str) -> bool:
+    """
+    对指定相对路径发 HEAD 请求，如果 Content-Type 包含 text/html 则视为目录。
+    """
+    encoded = quote(rel_path.encode("utf-8"))
+    url = f"{BASE_URL}/public_dir/{encoded}"
+    try:
+        r = session.head(url, timeout=5, allow_redirects=True)
+        ct = r.headers.get("Content-Type", "")
+        return "text/html" in ct
+    except Exception:
+        return False
+
+
 def list_public_entries(cur_dir: str):
     """
     列出当前目录下的条目（文件 + 子目录）。
-    size==4096 视为目录。
-    href 可能是相对路径 "qqqqq" 或绝对路径 "/public_dir/qqqqq"，统一取最后一段。
+    先从 HTML 解析名字列表，再对每个条目用 HEAD 判断目录/文件。
     """
     if cur_dir:
         url = f"{BASE_URL}/public_dir/{quote(cur_dir)}"
@@ -50,42 +63,37 @@ def list_public_entries(cur_dir: str):
     with open("public_dir_debug.html", "w", encoding="utf-8", errors="ignore") as f:
         f.write(html)
 
-    entries = []
-
+    # 解析所有条目名
+    raw_names = []
     row_pattern = re.compile(
         r'<tr>\s*<td>\s*<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>\s*</td>\s*'
         r'<td>\s*(\d+)\s*</td>',
         re.IGNORECASE,
     )
-
     for m in row_pattern.finditer(html):
         href = m.group(1)
         display_name = m.group(2).strip()
-        size = int(m.group(3))
-
-        # 跳过上级目录和 .thumb
         if href.startswith("..") or display_name == "..":
             continue
         if href.startswith(".thumb") or display_name.startswith(".thumb"):
             continue
-
-        # href 可能是绝对路径（/public_dir/qqqqq）或相对路径（qqqqq）
-        # 统一取 "/" 分割后最后一段作为纯文件/目录名
         decoded_href = unquote(href).strip().rstrip("/")
         name = decoded_href.rsplit("/", 1)[-1]
         if not name:
             continue
+        raw_names.append(name)
 
-        is_dir = (size == 4096)
+    # 对每个条目用 HEAD 判断目录还是文件
+    entries = []
+    for name in raw_names:
+        rel_path = f"{cur_dir}/{name}" if cur_dir else name
+        is_dir = _is_dir_by_head(rel_path)
         entries.append({"name": name, "is_dir": is_dir})
 
     return entries
 
 
 def download_public_file_stream(cur_dir, name, dst_path, status_cb=None):
-    """
-    从当前目录下载文件。
-    """
     path = f"{cur_dir}/{name}" if cur_dir else name
     encoded = quote(path.encode("utf-8"))
     url = f"{BASE_URL}/public_dir/{encoded}"
@@ -95,7 +103,6 @@ def download_public_file_stream(cur_dir, name, dst_path, status_cb=None):
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
         total = int(r.headers.get("Content-Length", "0") or "0")
         downloaded = 0
-
         with open(dst_path, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 64):
                 if not chunk:
@@ -129,16 +136,12 @@ def _ensure_remote_dir(rel_dir: str):
 def upload_single_file(local_path: str, remote_rel_path: str = None, status_cb=None):
     if remote_rel_path is None:
         remote_rel_path = os.path.basename(local_path)
-
     remote_rel_path = remote_rel_path.replace("\\", "/")
-
     if "/" in remote_rel_path:
         dir_part, file_name = remote_rel_path.rsplit("/", 1)
     else:
         dir_part, file_name = "", remote_rel_path
-
     _ensure_remote_dir(dir_part)
-
     encoded_name = quote(file_name.encode("utf-8"))
     if dir_part:
         url = f"{BASE_URL}/public_dir/{dir_part}/{encoded_name}"
@@ -146,10 +149,8 @@ def upload_single_file(local_path: str, remote_rel_path: str = None, status_cb=N
     else:
         url = f"{BASE_URL}/public_dir/{encoded_name}"
         show_name = file_name
-
     if status_cb:
         status_cb(f"正在上传：{show_name}")
-
     with open(local_path, "rb") as f:
         r = session.put(url, data=f, timeout=600)
     r.raise_for_status()
@@ -351,7 +352,6 @@ class YSZNViewer(tk.Tk):
                     name = os.path.basename(p)
                     remote_rel = f"{base}/{name}" if base else name
                     upload_single_file(p, remote_rel, status_cb=status_cb)
-
                 for root in dir_roots:
                     root_name = os.path.basename(root.rstrip("\\/"))
                     for dirpath, _, filenames in os.walk(root):
@@ -363,7 +363,6 @@ class YSZNViewer(tk.Tk):
                             else:
                                 remote_rel = f"{root_name}/{rel_path}"
                             upload_single_file(local_path, remote_rel_path=remote_rel, status_cb=status_cb)
-
                 status_cb("上传完成")
                 self.refresh_file_list_async()
             except Exception as e:
@@ -383,10 +382,8 @@ class YSZNViewer(tk.Tk):
             if name == "..":
                 continue
             names.append(name)
-
         if not names:
             return
-
         if not messagebox.askyesno(
             "确认删除",
             f"确定要删除选中的 {len(names)} 个条目吗？\n\n"
