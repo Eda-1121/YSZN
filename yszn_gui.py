@@ -36,8 +36,8 @@ _created_dirs_lock = threading.Lock()
 def list_public_entries(cur_dir: str):
     """
     列出当前目录下的条目（文件 + 子目录）。
-    解析表格中的"资源名 + 大小"：size==4096 视为目录。
-    href 为相对路径，如 "qqqqq" 或 "%E6%8A%80...".
+    size==4096 视为目录。
+    href 可能是相对路径 "qqqqq" 或绝对路径 "/public_dir/qqqqq"，统一取最后一段。
     """
     if cur_dir:
         url = f"{BASE_URL}/public_dir/{quote(cur_dir)}"
@@ -63,12 +63,16 @@ def list_public_entries(cur_dir: str):
         display_name = m.group(2).strip()
         size = int(m.group(3))
 
+        # 跳过上级目录和 .thumb
         if href.startswith("..") or display_name == "..":
             continue
         if href.startswith(".thumb") or display_name.startswith(".thumb"):
             continue
 
-        name = unquote(href).strip()
+        # href 可能是绝对路径（/public_dir/qqqqq）或相对路径（qqqqq）
+        # 统一取 "/" 分割后最后一段作为纯文件/目录名
+        decoded_href = unquote(href).strip().rstrip("/")
+        name = decoded_href.rsplit("/", 1)[-1]
         if not name:
             continue
 
@@ -171,10 +175,7 @@ class YSZNViewer(tk.Tk):
         super().__init__()
         self.title("YSZN Public Viewer")
         self.geometry("720x430")
-
-        # 当前所在的远端目录，相对 /public_dir，例如 "" 或 "qqqqq" 或 "qqqqq/sub"
         self.current_dir = ""
-
         self.create_widgets()
         self.refresh_file_list_async()
 
@@ -220,8 +221,6 @@ class YSZNViewer(tk.Tk):
         self.status_var.set(text)
         self.update_idletasks()
 
-    # ===== 刷新列表（当前目录） =====
-
     def refresh_file_list_async(self):
         t = threading.Thread(target=self.refresh_file_list, daemon=True)
         t.start()
@@ -241,21 +240,16 @@ class YSZNViewer(tk.Tk):
         def update_ui():
             self.tree.delete(*self.tree.get_children())
             self.tree.heading("name", text=f"{show_dir} 条目")
-
             if self.current_dir:
                 self.tree.insert("", tk.END, values=("..", "上级"), tags=("updir",))
-
             for e in entries:
                 typ = "目录" if e["is_dir"] else "文件"
                 tag = "dir" if e["is_dir"] else "file"
-                # 只存相对名（不带 /public_dir 前缀）
                 self.tree.insert("", tk.END, values=(e["name"], typ), tags=(tag,))
             self.set_status(f"{show_dir} 共 {len(entries)} 个条目")
             self.refresh_btn.config(state=tk.NORMAL)
 
         self.after(0, update_ui)
-
-    # ===== 双击行为：目录=进入，文件=下载 =====
 
     def on_double_click(self, event):
         item_id = self.tree.selection()
@@ -273,13 +267,10 @@ class YSZNViewer(tk.Tk):
             return
 
         if typ == "目录":
-            # current_dir 只拼相对路径，不含 /public_dir
             self.current_dir = f"{self.current_dir}/{name}" if self.current_dir else name
             self.refresh_file_list_async()
         else:
             self.download_and_open(name)
-
-    # ===== 下载 =====
 
     def download_and_open(self, name):
         subdir = self.current_dir.replace("/", "_")
@@ -300,7 +291,6 @@ class YSZNViewer(tk.Tk):
             except Exception as e:
                 self.set_status("下载失败")
                 messagebox.showerror("错误", f"下载失败：{e}")
-                return
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -334,8 +324,6 @@ class YSZNViewer(tk.Tk):
                 target=self.download_and_open, args=(name,), daemon=True
             ).start()
 
-    # ===== 上传 =====
-
     def upload_files_or_dirs(self):
         file_paths = filedialog.askopenfilenames(title="选择要上传的文件（可多选，可取消）")
         file_paths = list(file_paths)
@@ -357,9 +345,7 @@ class YSZNViewer(tk.Tk):
             global _created_dirs
             with _created_dirs_lock:
                 _created_dirs = set()
-
             base = self.current_dir
-
             try:
                 for p in file_paths:
                     name = os.path.basename(p)
@@ -385,8 +371,6 @@ class YSZNViewer(tk.Tk):
                 messagebox.showerror("错误", f"上传失败：{e}")
 
         threading.Thread(target=worker, daemon=True).start()
-
-    # ===== 删除 =====
 
     def delete_selected(self):
         items = self.tree.selection()
